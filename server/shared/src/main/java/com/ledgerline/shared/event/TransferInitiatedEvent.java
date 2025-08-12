@@ -1,0 +1,26 @@
+package com.ledgerline.shared.event;
+
+import java.math.BigDecimal;
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.NoArgsConstructor;
+import lombok.experimental.SuperBuilder;
+
+@Data
+@SuperBuilder
+@NoArgsConstructor
+@AllArgsConstructor
+@EqualsAndHashCode(callSuper = true)
+public class TransferInitiatedEvent extends DomainEvent {
+
+    private String transferId;
+    private String idempotencyKey;
+    private Long sourceAccountId;
+    private Long targetAccountId;
+    private Long sourceCustomerId;
+    private Long targetCustomerId;
+    private BigDecimal amount;
+    private String currency;
+    private String description;
+}
