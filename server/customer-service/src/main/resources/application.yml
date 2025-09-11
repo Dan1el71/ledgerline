@@ -1,0 +1,40 @@
+server:
+  port: 8082
+spring:
+  application:
+    name: customer-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ledgerline_customer}
+    username: ${DB_USERNAME:ledgerline}
+    password: ${DB_PASSWORD:ledgerline_secret}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://eureka:eureka@localhost:8761/eureka}
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+springdoc:
+  api-docs:
+    path: /api/v1/customers/v3/api-docs
