@@ -1,0 +1,13 @@
+:root {
+  /* Neutral product palette: gray canvas, white surfaces, one blue accent. */
+  --paper: 247 248 250;
+  --ink: 16 24 40;
+  --slate: 71 84 103;
+  --muted: 102 112 133;
+  --line: 228 231 236;
+  --surface: 255 255 255;
+  --primary: 29 78 216;
+  --accent: 29 78 216;
+  --danger: 185 28 28;
+  --success: 4 120 87;
+}
