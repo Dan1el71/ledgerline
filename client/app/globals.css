@@ -1,0 +1,79 @@
+@import "../styles/theme.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  border-color: rgb(var(--line));
+}
+
+body {
+  min-height: 100vh;
+  background-color: rgb(var(--paper));
+  color: rgb(var(--ink));
+  font-feature-settings: "cv11", "ss01";
+}
+
+a {
+  color: inherit;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.18);
+}
+
+@layer base {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-sans font-semibold tracking-tight;
+  }
+}
+
+@layer utilities {
+  .label {
+    @apply text-xs font-medium text-slate;
+  }
+
+  .num {
+    @apply tabular-nums;
+  }
+
+  .rule {
+    @apply border-t border-line;
+  }
+}
+
+@layer components {
+  .table-shell {
+    @apply overflow-hidden rounded-xl border border-line bg-surface;
+  }
+
+  .table-base {
+    @apply min-w-full divide-y divide-line text-sm;
+  }
+
+  .table-base thead {
+    @apply bg-paper;
+  }
+
+  .table-base th {
+    @apply px-4 py-3 text-left text-xs font-medium text-muted;
+  }
+
+  .table-base td {
+    @apply px-4 py-3 text-slate;
+  }
+
+  .table-base tbody tr {
+    @apply border-t border-line;
+  }
+
+  .table-base tbody tr:hover {
+    @apply bg-paper/70;
+  }
+}
