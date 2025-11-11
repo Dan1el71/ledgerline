@@ -1,0 +1,19 @@
+project_name        = "ledgerline"
+environment         = "dev"
+aws_region          = "us-east-1"
+kubernetes_version  = "1.30"
+
+# Keep this as SPOT for lowest compute cost.
+node_capacity_type  = "SPOT"
+node_instance_types = ["t4g.medium"]
+node_min_size       = 1
+node_desired_size   = 1
+node_max_size       = 2
+
+# Lock this down to your office/home IP in real usage.
+# Required: your own public IP(s). Find yours with: curl -s https://checkip.amazonaws.com
+cluster_endpoint_public_access_cidrs = ["203.0.113.10/32"]
+
+tags = {
+  Owner = "your-name"
+}
