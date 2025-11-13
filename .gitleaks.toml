@@ -1,0 +1,14 @@
+# Test fixtures use literal placeholder secrets and the Terraform bootstrap
+# secret holds REPLACE_ME values until the operator fills them in.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders and test fixtures"
+paths = [
+  '''ai/tests/.*\.py''',
+  '''terraform/aws-eks-production/modules/secrets-manager/main\.tf''',
+]
+regexes = [
+  '''REPLACE_ME''',
+]
