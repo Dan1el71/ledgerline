@@ -1,0 +1,43 @@
+### Create customer profile
+POST http://localhost:8080/api/v1/customers
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "userId": 1,
+  "firstName": "John",
+  "lastName": "Doe",
+  "email": "john@ledgerline.local",
+  "phoneNumber": "+15550100001",
+  "idNumber": "AB1234567",
+  "dateOfBirth": "1995-01-01",
+  "address": "123 Main Street, Springfield 00000"
+}
+
+### Get my customer profile
+GET http://localhost:8080/api/v1/customers/me
+Authorization: Bearer {{accessToken}}
+
+### Get customer by ID
+GET http://localhost:8080/api/v1/customers/1
+Authorization: Bearer {{accessToken}}
+
+### Update customer
+PUT http://localhost:8080/api/v1/customers/1
+Content-Type: application/json
+Authorization: Bearer {{accessToken}}
+
+{
+  "firstName": "John",
+  "lastName": "Doe",
+  "phoneNumber": "+15550100002",
+  "address": "456 New Street, Springfield, 2000"
+}
+
+### Update KYC status (admin only)
+PATCH http://localhost:8080/api/v1/customers/1/kyc?status=VERIFIED
+Authorization: Bearer {{adminAccessToken}}
+
+### List customers (admin only)
+GET http://localhost:8080/api/v1/customers?page=0&size=20
+Authorization: Bearer {{adminAccessToken}}
