@@ -1,0 +1,391 @@
+# Ledgerline
+
+A digital bank built as event-driven microservices: nine Spring Boot services and a Python AI
+service behind one API gateway, a Next.js web app, and a double-entry ledger that the database
+itself enforces. It runs locally with Docker Compose and deploys to AWS EKS with Helm and
+Terraform.
+
+**Status:** the backend builds and its test suite passes on JDK 21 with Docker available. The
+deployment manifests and Terraform are complete but have not been applied to a live cluster.
+
+![Ledgerline dashboard](docs/screenshots/02-dashboard.png)
+
+*Customer home: total balance, accounts and recent activity. The interface follows the product
+guidelines in [docs/brand.md](docs/brand.md).*
+
+## Contents
+
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [How money moves](#how-money-moves)
+- [Security model](#security-model)
+- [AI features](#ai-features)
+- [Repository layout](#repository-layout)
+- [Quick start](#quick-start)
+- [Local development](#local-development)
+- [Services](#services)
+- [API overview](#api-overview)
+- [Testing and quality](#testing-and-quality)
+- [Deployment](#deployment)
+- [Tech stack](#tech-stack)
+- [Screens](#screens)
+- [Known limitations](#known-limitations)
+- [License](#license)
+
+## What it does
+
+**For customers**
+
+- Sign up, then verify your identity (government ID number validated on the client and the
+  server).
+- Open cheque and savings accounts once verified.
+- Move money between your own accounts, or pay any Ledgerline account by account number. Paying a
+  new account asks for your password again (step-up).
+- Per-payment ($50,000) and daily ($100,000) limits.
+- Search transactions by type, date and text, or ask in plain English ("how much did I spend on
+  Uber last month?").
+- Statements for any period, with opening and closing balances taken from the ledger, ready to
+  print or save as PDF.
+- An in-app notification inbox, monthly spending insights, and an assistant you can type or talk
+  to. The assistant can prepare a payment; only you can confirm it.
+
+**For staff (back office)**
+
+- KYC review queue (approve or reject).
+- Account operations: freeze, unfreeze, close.
+- Branch cash deposits.
+- Ledger health: live reconciliation of every balance against its postings.
+- Audit log of every domain event.
+- User role management (an admin can't change their own role).
+
+## Architecture
+
+```mermaid
+flowchart TD;
+    Browser["Browser"] --> Web["Next.js web app + BFF route handlers"];
+    Web -->|HttpOnly session| Gateway["api-gateway"];
+    Gateway --> Auth["auth-service"];
+    Gateway --> Customer["customer-service"];
+    Gateway --> Account["account-service (ledger)"];
+    Gateway --> Txn["transaction-service"];
+    Gateway --> Notify["notification-service"];
+    Gateway --> Audit["audit-service"];
+    Gateway --> Report["reporting-service"];
+    Gateway --> AI["ai-service (Python)"];
+    Txn -->|internal ledger API| Account;
+    Report --> Account;
+    Report --> Txn;
+    AI -->|user-scoped token| Customer;
+    AI -->|user-scoped token| Account;
+    AI -->|user-scoped token| Txn;
+    AI --> Claude["Claude (Anthropic)"];
+    AI --> Deepgram["Deepgram (voice)"];
+    Account -->|outbox| Kafka[("Kafka")];
+    Customer -->|outbox| Kafka;
+    Txn -->|outbox| Kafka;
+    Kafka --> Notify;
+    Kafka --> Audit;
+    Auth --> Redis[("Redis")];
+    Gateway --> Redis;
+    Account --> PG[("PostgreSQL, one database per service")];
+    Txn --> PG;
+```
+
+How a request flows:
+
+1. The browser only ever talks to the Next.js app on its own origin. Route handlers hold the
+   session in HttpOnly cookies and forward calls to the gateway.
+2. The gateway validates the user's JWT, checks the revocation list, strips any identity headers
+   the client sent, rate-limits per user, and attaches a 60-second signed internal token.
+3. Each service verifies that internal token and applies role and ownership rules.
+   Service-to-service calls carry their own signed token: a user-scoped one, or a `SERVICE` one
+   for internal ledger calls.
+4. State changes that others care about are written to an outbox in the same database transaction
+   and published to Kafka. Consumers retry with backoff and park bad records on a dead-letter
+   topic.
+
+## How money moves
+
+`account-service` is the only owner of money:
+
+- **Double-entry and immutable.** Every movement is a journal of postings that sum to zero. A
+  deferred constraint trigger rejects any journal that doesn't balance, and postings can't be
+  updated or deleted. Corrections are reversing journals.
+- **System accounts.** Cash deposits and withdrawals post against `CASH_CLEARING`, so money never
+  appears from nowhere. Customers cannot deposit; branch staff record cash.
+- **Locked and idempotent.** A journal locks the accounts it touches (in id order, so no
+  deadlocks), checks status, currency and available balance, and writes postings plus the balance
+  projection in one transaction. Journals are keyed by the caller's idempotency key, so a retry
+  never posts twice.
+- **Crash-safe transfers.** `transaction-service` records each instruction as `PENDING` before
+  calling the ledger. A recovery job replays stale `PENDING` instructions with the same key, so a
+  crash at any point ends in exactly one outcome. An internal transfer is a single atomic journal,
+  not a multi-step saga.
+- **Reconciliation.** A nightly job (also available live in the back office) checks that all
+  postings sum to zero and that every balance equals the sum of its postings.
+
+## Security model
+
+- **No tokens in JavaScript.** Access and refresh tokens are HttpOnly, `SameSite=Strict` cookies.
+  Refresh tokens rotate and are single-use, and signing out revokes both tokens server-side.
+- **CSRF and XSS.** Every mutation needs a same-origin `Origin` plus a custom header. A strict
+  Content Security Policy is set (`connect-src 'self'`, `frame-ancestors 'none'`). Third-party text
+  (payment references, model output) is rendered as plain text only.
+- **Step-up.** Paying a new account requires re-entering your password. Payments the assistant
+  prepares always need this.
+- **Zero trust between services.** Raw identity headers are ignored. Only signed internal tokens
+  are accepted, and `/internal/**` requires the `SERVICE` role.
+- **Accounts.** Passwords must be 12+ characters with mixed character types. Sign-in locks for
+  15 minutes after repeated failures, and unknown emails take the same time to reject as known ones.
+- **No default secrets.** Every secret comes from the environment. `scripts/dev-secrets.sh`
+  generates local ones into a git-ignored `.env`, and Helm refuses to render without them.
+- **Network.** Docker Compose publishes only the web app and the gateway, both on `127.0.0.1`.
+  Helm adds a default-deny NetworkPolicy. Containers run as non-root with no privilege escalation,
+  and the AI and web containers use read-only filesystems.
+- **CI.** CodeQL (Java, TypeScript, Python), Trivy dependency and misconfiguration scanning, and
+  Gitleaks secret scanning run on every push.
+
+## AI features
+
+A separate Python service (`ai/`: FastAPI, Pydantic v2, uv, pyright) built on these rules:
+
+- **The ledger is the source of truth.** Models never do arithmetic on money; totals come from SQL
+  or `Decimal`, and the model only writes words around them.
+- **Least autonomy.** Use a workflow by default. The only open-ended agent is the assistant, and it
+  can't move money.
+- **Authorization lives in tools.** Every tool call runs with a token minted for the signed-in user,
+  so the model can never see or do more than the customer could in the app.
+
+| Feature | How it works | Model |
+|---|---|---|
+| Transaction categorization | Rules first, model for the long tail, low confidence goes to review | Claude Haiku |
+| Natural-language search | Model fills a typed filter; the API applies it; totals computed in code | Claude Haiku |
+| Help answers | Policy documents in a cached prompt with citations; no citation means "contact support" | Claude Sonnet |
+| Monthly insights | Facts computed in code; model writes sentences; a deterministic check drops any number not in the facts | Claude Sonnet |
+| Assistant | Narrow, typed, user-scoped tools; payments become server-side proposals the customer confirms with step-up | Claude Sonnet / Opus |
+| Voice | Deepgram speech-to-text → the same assistant → Deepgram text-to-speech; audio is never stored | Deepgram Nova / Aura |
+
+**Defences against prompt injection.** Payment references are written by whoever sends the money,
+so they are treated as hostile:
+
+- They are screened and wrapped as untrusted data before the model sees them.
+- A payee that the customer didn't type themselves is flagged on the confirmation card.
+- Output links and images are stripped.
+- Personal identifiers are masked before text reaches a provider.
+- Each user has a daily spend cap.
+
+**Evals.** `ai/evals` holds versioned golden sets (categorization, search, help, assistant) with
+deterministic graders, per-suite thresholds in `thresholds.json` and a CI gate
+(`.github/workflows/ai-evals.yml`). The assistant suite includes red-team scenarios.
+
+AI features are optional: without `ANTHROPIC_API_KEY` the service reports itself unavailable and
+the rest of the bank works normally.
+
+## Repository layout
+
+```
+server/           nine Spring Boot services, the gateway, Eureka and a shared library (Maven)
+ai/               the Python AI service (uv)
+client/           the Next.js web app, with route handlers as the BFF
+helm/ledgerline   umbrella Helm chart, one subchart per service
+terraform/        EKS/RDS/MSK: a production stack and a cheaper Spot stack
+scripts/          local secrets, database creation, the end-to-end journey
+docs/             screenshots and extra documentation
+```
+
+## Quick start
+
+Prerequisites: Docker with Compose v2 (8 GB of memory allocated) and `openssl` for secret
+generation.
+
+```bash
+cp .env.example .env
+sh scripts/dev-secrets.sh          # generates local secrets into .env (never printed)
+# optional: add ANTHROPIC_API_KEY and DEEPGRAM_API_KEY to .env for the AI features
+docker compose up --build
+```
+
+| What | URL |
+|------|-----|
+| Web app | http://localhost:3000 |
+| API gateway | http://localhost:8080 |
+| Eureka dashboard | http://localhost:8761 |
+
+A bootstrap admin is created on first boot: `admin@ledgerline.local`, with the password stored as
+`ADMIN_PASSWORD` in your `.env`.
+
+To try the full journey:
+
+1. Register a customer and complete onboarding.
+2. Sign in as the admin, approve the customer in **Back office → KYC queue**, and record a cash
+   deposit.
+3. As the customer, open a second account and transfer between accounts.
+4. Pay another customer's account number, then generate a statement.
+
+## Local development
+
+**JDK 21 is required.** Lombok 1.18.36 does not compile with JDK 22 or newer: the build fails with
+`ExceptionInInitializerError: TypeTag :: UNKNOWN`. Maven Enforcer checks the version and fails
+with a clear message, and `.sdkmanrc` pins it for SDKMAN users. Node 20+ and Python 3.12+ are
+needed for the other two apps (`.nvmrc` pins Node 20).
+
+```bash
+docker compose up postgres kafka redis     # infra on 127.0.0.1:5433 / 9092 / 6380
+
+cd server
+./mvnw clean install -DskipTests           # Maven wrapper, JDK 21
+
+cd ../ai
+uv sync && uv run uvicorn ledgerline_ai.main:app --port 8090
+
+cd ../client
+npm ci && npm run dev                      # set API_URL and SESSION_SECRET in client/.env.local
+```
+
+Each service owns its database (`ledgerline_auth`, `ledgerline_customer`, `ledgerline_account`,
+`ledgerline_transaction`, `ledgerline_notification`, `ledgerline_audit`, `ledgerline_reporting`).
+The `test` profile accepts `DB_URL` to override a single service, and `POSTGRES_TEST_PORT` to point
+every service at a non-default port (the Compose database listens on 5433). Without either, the
+service connects to `jdbc:postgresql://localhost:5432/ledgerline_<service>`.
+
+## Services
+
+| Service | Port | Responsibility |
+|---------|------|----------------|
+| `api-gateway` | 8080 | The only API entry point: JWT validation, revocation, header stripping, internal tokens, rate limits |
+| `auth-service` | 8081 | Registration, sign-in with lockout, rotating refresh tokens, revocation, user roles |
+| `customer-service` | 8082 | Customer profiles and KYC status |
+| `account-service` | 8083 | Accounts and the double-entry ledger, reconciliation, balance at any point in time |
+| `transaction-service` | 8084 | Deposits, withdrawals and transfers (PENDING → COMPLETED/FAILED), limits, history search |
+| `notification-service` | 8085 | In-app inbox from domain events; email delivery seam |
+| `audit-service` | 8086 | Append-only, deduplicated audit log of every domain event |
+| `reporting-service` | 8087 | Statements that reconcile to the ledger |
+| `ai-service` | 8090 | Categorization, search, help, insights, assistant, voice |
+| `discovery-service` | 8761 | Eureka registry (Compose; Kubernetes uses Services) |
+| `frontend` | 3000 | Next.js 15 web app with backend-for-frontend route handlers |
+
+## API overview
+
+All routes are behind the gateway. Money-moving `POST`s require an `Idempotency-Key` header.
+
+| Area | Endpoints |
+|------|-----------|
+| Auth | `POST /api/v1/auth/{register,login,refresh,logout}`, `GET /api/v1/auth/users`, `PUT /api/v1/auth/users/{id}/role` |
+| Customers | `POST /api/v1/customers`, `GET /api/v1/customers/me`, `PUT /api/v1/customers/{id}`, `GET /api/v1/customers?kycStatus=`, `PATCH /api/v1/customers/{id}/kyc` |
+| Accounts | `POST /api/v1/accounts`, `GET /api/v1/accounts`, `GET /api/v1/accounts/{id}`, `GET /api/v1/accounts/{id}/balance?at=`, `GET /api/v1/accounts/customer/{id}`, `PATCH /api/v1/accounts/{id}/{freeze,unfreeze,close}`, `GET /api/v1/accounts/admin/reconciliation` |
+| Transactions | `POST /api/v1/transactions/{deposit,withdraw}`, `GET /api/v1/transactions/mine`, `GET /api/v1/transactions/account/{id}?type=&from=&to=&q=`, `GET /api/v1/transactions/{id}` |
+| Transfers | `POST /api/v1/transfers` (`targetAccountId` or `targetAccountNumber`), `GET /api/v1/transfers/{id}` |
+| Notifications | `GET /api/v1/notifications`, `GET /api/v1/notifications/unread-count`, `PATCH /api/v1/notifications/{id}/read`, `POST /api/v1/notifications/read-all` |
+| Statements | `POST /api/v1/reports/statements`, `GET /api/v1/reports/statements/{id}`, `GET /api/v1/reports/statements/{account,customer}/{id}` |
+| Audit | `GET /api/v1/audit`, `GET /api/v1/audit/{id}`, `GET /api/v1/audit/aggregate/{type}/{id}` |
+| AI | `POST /api/v1/ai/{assistant,search,help,categorize,voice}`, `GET /api/v1/ai/insights`, `GET /api/v1/ai/proposals/{id}` |
+
+Each Java service also serves OpenAPI docs at `/swagger-ui.html` on its own port, reachable from
+inside the Docker network only.
+
+## Testing and quality
+
+```bash
+# One-time: databases for the context-loading tests
+sh scripts/create-test-databases.sh
+
+# Java: unit, security and Testcontainers integration tests
+cd server && ./mvnw verify -Dspring.profiles.active=test -Deureka.client.enabled=false
+
+cd ../ai && uv run pytest && uv run pyright && uv run ruff check .
+cd ../ai && uv run python -m evals.run --trials 3   # live-model evals (needs ANTHROPIC_API_KEY)
+cd ../client && npm run lint && npm run typecheck && npm run build
+python scripts/e2e_journey.py                       # end-to-end journey against a running stack
+```
+
+Highlights:
+
+- An end-to-end journey (`scripts/e2e_journey.py`, ~40 assertions) checks the running stack:
+  signup, KYC, deposits, transfers, idempotent replays, limits, cross-customer access, spoofed
+  headers, internal routes, ledger reconciliation, statements, notifications, the AI endpoints and
+  the web app's cookie, CSRF, step-up and CSP protections.
+- Ledger integration tests against real Postgres: idempotent replays, overdraw rejection, 50
+  concurrent withdrawals that never overdraw, and database-level rejection of unbalanced or edited
+  postings.
+- Security tests: spoofed identity headers and forged internal tokens are rejected, internal
+  endpoints refuse even admins, and unverified customers can't open accounts.
+- AI tests run offline with a fake model and bank. They cover the injection scenario (a malicious
+  payment reference), proposals bound to their owner, the step limit and token verification.
+
+Test notes:
+
+- Tests that need Docker (Testcontainers) skip themselves when the JVM cannot reach the daemon. On
+  Linux the user must be in the `docker` group, or `DOCKER_HOST` must point at the socket.
+- The context-loading tests need PostgreSQL with one database per service; the script above creates
+  them and finds either `psql` or a running Postgres container (use `PG_CONTAINER=<name>` if the
+  container has an unusual name, and `PGPORT` if it is not on 5432). CI creates the same set before
+  running the suite.
+
+CI (`.github/workflows/`): Java build and tests with Spotless and Checkstyle, AI lint, types and
+tests, client lint, types and build, Helm lint, Docker builds for all 11 images, CodeQL, Trivy,
+Gitleaks and the AI eval gate.
+
+## Deployment
+
+| Environment | Infrastructure | Trigger |
+|-------------|----------------|---------|
+| Local | Docker Compose (host ports overridable with `GATEWAY_HOST_PORT`, `WEB_HOST_PORT`, `POSTGRES_HOST_PORT`, ...) | `docker compose up` |
+| Staging | EKS with in-cluster Postgres, Redis and Kafka via Helm | Push to `main` |
+| Production | EKS with RDS, ElastiCache and MSK | Manual `workflow_dispatch` with per-service toggles |
+
+`helm/ledgerline` is an umbrella chart: one subchart per service plus shared config. Secrets are
+required values, or come from AWS Secrets Manager through `ExternalSecret` resources. Pods run
+non-root with a seccomp profile, and a default-deny NetworkPolicy admits outside traffic only to
+the gateway and the frontend.
+
+```bash
+helm upgrade --install ledgerline ./helm/ledgerline \
+  --namespace ledgerline --create-namespace \
+  --set global.jwt.secret=... --set global.internalJwt.secret=... --set global.postgres.password=...
+```
+
+Terraform lives in `terraform/aws-eks-production` (VPC across three AZs, EKS, Multi-AZ RDS,
+ElastiCache, MSK, ECR, ALB controller, External Secrets) and `terraform/aws-eks-cheap` (a Spot
+cluster for experiments). The deployment job only runs when the repository variable
+`DEPLOY_ENABLED` is `"true"`; the sample values in `terraform.tfvars.example` are placeholders and
+no environment has been applied yet.
+
+## Tech stack
+
+| Area | Technologies |
+|------|--------------|
+| Backend | Java 21, Spring Boot 3.5, Spring Cloud Gateway, Spring Security, Spring Data JPA, Flyway, MapStruct, Kafka, Redis, PostgreSQL 16 |
+| AI | Python 3.13, FastAPI, Pydantic v2, Anthropic SDK, Deepgram, OpenTelemetry, Prometheus |
+| Frontend | Next.js 15 (App Router, route handlers as BFF), React 19, TypeScript, Tailwind CSS, TanStack Query, Zod |
+| Quality | JUnit 5, Testcontainers, pytest, pyright, ruff, ESLint, Spotless, Checkstyle, CodeQL, Trivy, Gitleaks |
+| Delivery | Docker Compose, Helm, Terraform (AWS EKS, RDS, ElastiCache, MSK), GitHub Actions |
+
+## Screens
+
+| | |
+|---|---|
+| ![Sign in](docs/screenshots/01-login.png) | ![Accounts](docs/screenshots/03-accounts.png) |
+| Sign in: email and password | Accounts: balances and account numbers |
+| ![Pay and transfer](docs/screenshots/05-transfer.png) | ![Transactions](docs/screenshots/06-transactions.png) |
+| Transfer with review and step-up | Transactions with filters and search |
+| ![Back office](docs/screenshots/08-back-office.png) | ![Mobile](docs/screenshots/09-mobile-dashboard.png) |
+| Back office: KYC, accounts, cash, ledger | Overview on a 390px viewport |
+
+## Known limitations
+
+- MFA (TOTP or passkeys), saved beneficiaries, scheduled payments and cards are not built yet.
+  Password step-up protects new-payee payments in the meantime.
+- Email delivery is a logging seam; notifications are in-app.
+- Service-to-service tokens use a shared HMAC key. Moving to RS256 with JWKS and mTLS between pods
+  is planned.
+- Some services still store local timestamps without time zone; the ledger and transactions use
+  `timestamptz`.
+- The support copilot, fraud scoring model and phone-line voice channel are not built.
+- `api-gateway`, `notification-service`, `audit-service` and `reporting-service` have no tests, and
+  the web client has none either; coverage is concentrated on the ledger and security.
+- Observability stops at Prometheus metrics and health checks: the Java services have no
+  distributed tracing and there are no dashboards or alerts.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

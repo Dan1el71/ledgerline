@@ -1,0 +1,168 @@
+name: CD
+
+# Push to main deploys every service to staging; a manual run picks the environment and a
+# comma-separated list of services. Deployment only runs once the repository variable
+# DEPLOY_ENABLED is "true" (set it after the AWS role and secrets below exist).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options: [staging, production]
+        default: staging
+      services:
+        description: Comma-separated services to deploy, or "all"
+        required: true
+        type: string
+        default: all
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ALL_SERVICES: >-
+    discovery-service,api-gateway,auth-service,customer-service,account-service,
+    transaction-service,notification-service,audit-service,reporting-service,ai-service,frontend
+
+jobs:
+  prepare:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.config.outputs.environment }}
+      eks_cluster: ${{ steps.config.outputs.eks_cluster }}
+      services: ${{ steps.config.outputs.services }}
+    steps:
+      - name: Resolve deployment config
+        id: config
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_ENV: ${{ inputs.environment }}
+          INPUT_SERVICES: ${{ inputs.services }}
+        run: |
+          ALL=$(echo "$ALL_SERVICES" | tr -d ' \n')
+          if [ "$EVENT" = "push" ]; then
+            ENV=staging; REQUESTED=all
+          else
+            ENV="$INPUT_ENV"; REQUESTED=$(echo "$INPUT_SERVICES" | tr -d ' ')
+          fi
+          [ "$REQUESTED" = "all" ] && REQUESTED="$ALL"
+          # Reject anything not in the allowlist (inputs are user-controlled).
+          for svc in $(echo "$REQUESTED" | tr ',' ' '); do
+            echo ",$ALL," | grep -q ",$svc," || { echo "Unknown service: $svc"; exit 1; }
+          done
+          SERVICES=$(echo "$REQUESTED" | jq -R -c 'split(",") | map(select(length > 0))')
+          CLUSTER=ledgerline-staging
+          [ "$ENV" = "production" ] && CLUSTER=ledgerline-production
+          {
+            echo "environment=$ENV"
+            echo "eks_cluster=$CLUSTER"
+            echo "services=$SERVICES"
+          } >> "$GITHUB_OUTPUT"
+
+  build-push:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: ${{ fromJSON(needs.prepare.outputs.services) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build context
+        id: ctx
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: |
+          case "$SERVICE" in
+            frontend)   echo "context=client" >> "$GITHUB_OUTPUT"; echo "dockerfile=client/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+            ai-service) echo "context=ai" >> "$GITHUB_OUTPUT"; echo "dockerfile=ai/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "context=server" >> "$GITHUB_OUTPUT"; echo "dockerfile=server/$SERVICE/Dockerfile" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ steps.ctx.outputs.context }}
+          file: ./${{ steps.ctx.outputs.dockerfile }}
+          push: true
+          provenance: true
+          sbom: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/ledgerline/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    needs: [prepare, build-push]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.prepare.outputs.environment }}
+    concurrency:
+      group: deploy-${{ needs.prepare.outputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ needs.prepare.outputs.eks_cluster }} --region ${{ env.AWS_REGION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+
+      - name: Deploy with Helm
+        env:
+          SERVICES: ${{ needs.prepare.outputs.services }}
+          ENVIRONMENT: ${{ needs.prepare.outputs.environment }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          INTERNAL_JWT_SECRET: ${{ secrets.INTERNAL_JWT_SECRET }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          ARGS=()
+          for svc in $(echo "$SERVICES" | jq -r '.[]'); do
+            ARGS+=(--set "${svc}.image.tag=${GITHUB_SHA}")
+          done
+          if [ "$ENVIRONMENT" = "production" ]; then
+            # Production reads secrets from AWS Secrets Manager via ExternalSecrets.
+            ARGS+=(--values helm/ledgerline/values-production.yaml)
+          else
+            ARGS+=(--set-string "global.jwt.secret=${JWT_SECRET}"
+                   --set-string "global.internalJwt.secret=${INTERNAL_JWT_SECRET}"
+                   --set-string "global.postgres.password=${POSTGRES_PASSWORD}")
+          fi
+          helm upgrade --install ledgerline ./helm/ledgerline \
+            --namespace ledgerline --create-namespace \
+            --set "global.imageRegistry=${REGISTRY}" \
+            "${ARGS[@]}" \
+            --wait --timeout 10m

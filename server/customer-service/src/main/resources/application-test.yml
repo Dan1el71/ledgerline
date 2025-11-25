@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:${POSTGRES_TEST_PORT:5432}/ledgerline_customer}
+    username: ledgerline
+    password: ledgerline_secret
+  kafka:
+    bootstrap-servers: localhost:9092
+eureka:
+  client:
+    enabled: false
+internal:
+  jwt:
+    secret: test-internal-secret-that-is-long-enough-0123456789

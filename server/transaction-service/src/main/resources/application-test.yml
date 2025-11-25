@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:${POSTGRES_TEST_PORT:5432}/ledgerline_transaction_test}
+    username: ledgerline
+    password: ledgerline_secret
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  flyway:
+    enabled: false
+  kafka:
+    bootstrap-servers: localhost:9092
+
+eureka:
+  client:
+    enabled: false
+
+account-service:
+  url: http://localhost:8083
+
+customer-service:
+  url: http://localhost:8082
+internal:
+  jwt:
+    secret: test-internal-secret-that-is-long-enough-0123456789
