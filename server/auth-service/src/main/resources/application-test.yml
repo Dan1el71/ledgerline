@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:${POSTGRES_TEST_PORT:5432}/ledgerline_auth}
+    username: ledgerline
+    password: ledgerline_secret
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  data:
+    redis:
+      host: localhost
+eureka:
+  client:
+    enabled: false
+
+auth:
+  bootstrap:
+    enabled: false
+internal:
+  jwt:
+    secret: test-internal-secret-that-is-long-enough-0123456789
+jwt:
+  secret: test-jwt-secret-that-is-long-enough-for-hs256-0123456789

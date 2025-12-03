@@ -1,0 +1,231 @@
+# Dev defaults: in-cluster infrastructure enabled
+createNamespace: false
+
+global:
+  networkPolicy:
+    enabled: true
+    ingressNamespace: kube-system
+  imageRegistry: ""
+  imagePullPolicy: IfNotPresent
+  eureka:
+    url: http://eureka:eureka@discovery-service:8761/eureka/
+  redis:
+    host: redis
+    port: "6379"
+  kafka:
+    bootstrapServers: kafka:9092
+  postgres:
+    host: postgres
+    port: "5432"
+    username: ledgerline
+    password: ""
+  internalJwt:
+    # Required. Signs short-lived service-to-service identity tokens.
+    secret: ""
+  redis:
+    password: ""
+  ai:
+    anthropicApiKey: ""
+    openaiApiKey: ""
+    deepgramApiKey: ""
+  jwt:
+    # Required. Set with --set or an ExternalSecret; never commit real values.
+    secret: ""
+  serviceUrls:
+    customer: http://customer-service:8082
+    account: http://account-service:8083
+    transaction: http://transaction-service:8084
+  jvmOpts: "-Xmx192m -Xms96m -XX:MaxMetaspaceSize=96m -XX:ReservedCodeCacheSize=48m -Xss256k -XX:+UseSerialGC"
+  externalSecrets:
+    enabled: false
+  auth:
+    bootstrapEnabled: "true"
+    bootstrapAdminEmail: admin@ledgerline.local
+    bootstrapAdminPassword: ""
+
+# --- Infrastructure subcharts ---
+config:
+  enabled: true
+
+postgres:
+  enabled: true
+
+redis:
+  enabled: true
+
+kafka:
+  enabled: true
+
+# --- Service subcharts ---
+discovery-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-discovery-service
+    tag: latest
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+api-gateway:
+  replicaCount: 1
+  image:
+    repository: ledgerline-api-gateway
+    tag: latest
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+auth-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-auth-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_auth
+  usesRedis: true
+  usesKafka: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+customer-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-customer-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_customer
+  usesRedis: true
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+account-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-account-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_account
+  usesRedis: true
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+transaction-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-transaction-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_transaction
+  usesRedis: false
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+notification-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-notification-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_notification
+  usesRedis: false
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+audit-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-audit-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_audit
+  usesRedis: false
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+reporting-service:
+  replicaCount: 1
+  image:
+    repository: ledgerline-reporting-service
+    tag: latest
+  usesDb: true
+  dbName: ledgerline_reporting
+  usesRedis: false
+  usesKafka: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi
+
+frontend:
+  replicaCount: 1
+  image:
+    repository: ledgerline-client
+    tag: latest
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+ai-service:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: ledgerline-ai-service
+    tag: latest
+  port: 8090
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
