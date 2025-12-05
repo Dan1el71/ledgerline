@@ -1,5 +1,7 @@
 # Ledgerline
 
+**English** · [Español](README.es.md)
+
 A digital bank built as event-driven microservices: nine Spring Boot services and a Python AI
 service behind one API gateway, a Next.js web app, and a double-entry ledger that the database
 itself enforces. It runs locally with Docker Compose and deploys to AWS EKS with Helm and
